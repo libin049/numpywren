@@ -1,0 +1,4 @@
+1. 按照https://travis-ci.org/Vaishaal/numpywren/jobs/523561192进行安装
+2. fix a bug
+3. 要求redis版本,版本不能太高, pip install redis==2.10.6, redis-3.2.1会出错
+4. 将scripts拷贝到安装目录
