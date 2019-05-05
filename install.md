@@ -1,6 +1,6 @@
 OS: linux
 
-This is numpywren lambdapack3.0 branch.
+This is numpywren nsdi branch.
 If you want to see other branch, please see https://github.com/Vaishaal/numpywren.
 
 1. Install env:
@@ -56,6 +56,25 @@ lanuch a ec2 for redis
 ```
 numpywren control-plane launch 
 ```
+
+4. upload runtimes to S3 (useless)
+Some info:
+ - https://github.com/pywren/pywren/pull/169
+ - https://github.com/pywren/pywren/issues/105
+ - https://github.com/pywren/pywren/pull/172
+
+```
+git clone https://github.com/libin049/runtimes
+cd runtimes
+fab -f fabfile_builder.py -R builder build_single_runtime:"minimal","3.6" -i "~/lb-test.pem"
+```
+`~/lb-test.pem` is the private key file path.
+
+Then input:
+```
+ubuntu@ec2-54-71-113-139.us-west-2.compute.amazonaws.com
+```
+`ubuntu` is the name, `ec2-54-71-113-139.us-west-2.compute.amazonaws.com` is the host name.
 
 Then, you can run:
 ```

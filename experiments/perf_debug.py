@@ -19,6 +19,7 @@ import logging
 import copy
 import pywren.wrenconfig as wc
 from numpywren import compiler
+from numpywren.alg_wrappers import cholesky, tsqr, gemm, qr
 import numpywren as npw
 import dill
 import traceback
@@ -27,10 +28,15 @@ import traceback
 
 INFO_FREQ = 5
 
+def parse_int(x):
+    if x is None: return 0
+    return int(x)
 
-''' OSDI numpywren optimization effectiveness experiments '''
 
-def run_experiment(problem_size, shard_size, pipeline, num_priorities, lru, eager, truncate, max_cores, start_cores, trial, launch_granularity, timeout, log_granularity, autoscale_policy, standalone, warmup, verify, matrix_exists, read_limit, write_limit):
+
+''' NSDI qr effectiveness experiments '''
+
+def run_experiment(problem_size, shard_size, pipeline, num_priorities, lru, eager, truncate, max_cores, start_cores, trial, launch_granularity, timeout, log_granularity, autoscale_policy, standalone, warmup, verify, matrix_exists, read_limit, write_limit, compute_threads_per_worker):
     # set up logging
     invoke_executor = fs.ThreadPoolExecutor(1)
     logger = logging.getLogger()
@@ -52,24 +58,25 @@ def run_experiment(problem_size, shard_size, pipeline, num_priorities, lru, eage
     logger.addHandler(ch)
     logger.info("Logging to {0}".format(log_file))
     if standalone:
-        extra_env ={"AWS_ACCESS_KEY_ID" : os.environ["AWS_ACCESS_KEY_ID"], "AWS_SECRET_ACCESS_KEY": os.environ["AWS_ACCESS_KEY_ID"], "OMP_NUM_THREADS":"1", "AWS_DEFAULT_REGION":region}
+        extra_env ={"AWS_ACCESS_KEY_ID" : os.environ["AWS_ACCESS_KEY_ID"].strip() , "AWS_SECRET_ACCESS_KEY": os.environ["AWS_SECRET_ACCESS_KEY"].strip(), "OMP_NUM_THREADS":"1", "AWS_DEFAULT_REGION":region}
         config = wc.default()
         config['runtime']['s3_bucket'] = 'numpywrenpublic'
-        key = "pywren.runtime/pywren_runtime-3.6-numpywren-standalone.tar.gz"
+        key = "pywren.runtime/pywren_runtime-3.6-numpywren.tar.gz"
         config['runtime']['s3_key'] = key
         pwex = pywren.standalone_executor(config=config)
     else:
         extra_env = {"AWS_DEFAULT_REGION":region}
         config = wc.default()
-        config['runtime']['s3_bucket'] = 'numpywrenpublic-us-east-1'
-        key = "pywren.runtime/pywren_runtime-3.6-numpywren-08-25-2018.tar.gz"
+        config['runtime']['s3_bucket'] = 'numpywrenpublic'
+        key = "pywren.runtime/pywren_runtime-3.6-numpywren.tar.gz"
         config['runtime']['s3_key'] = key
+        print(config)
         pwex = pywren.default_executor(config=config)
 
     if (not matrix_exists):
         X = np.random.randn(problem_size, 1)
         shard_sizes = [shard_size, 1]
-        X_sharded = BigMatrix("cholesky_test_{0}_{1}".format(problem_size, shard_size), shape=X.shape, shard_sizes=shard_sizes, write_header=True, autosqueeze=False, bucket="numpywrentop500test", hash_keys=False)
+        X_sharded = BigMatrix("qr_test_{0}_{1}".format(problem_size, shard_size), shape=X.shape, shard_sizes=shard_sizes, write_header=True, autosqueeze=False, bucket="numpywrennsdi2")
         shard_matrix(X_sharded, X)
         print("Generating PSD matrix...")
         t = time.time()
@@ -78,52 +85,18 @@ def run_experiment(problem_size, shard_size, pipeline, num_priorities, lru, eage
         e = time.time()
         print("GEMM took {0}".format(e - t))
     else:
-        X_sharded = BigMatrix("cholesky_test_{0}_{1}".format(problem_size, shard_size), autosqueeze=False, hash_keys=False, bucket="numpywrentop500test")
+        X_sharded = BigMatrix("qr_test_{0}_{1}".format(problem_size, shard_size), autosqueeze=False, bucket="numpywrennsdi2")
         key_name = binops.generate_key_name_binop(X_sharded, X_sharded.T, "gemm")
-        XXT_sharded = BigMatrix(key_name, hash_keys=False, bucket="numpywrentop500test")
+        XXT_sharded = BigMatrix(key_name, hash_keys=False, bucket="numpywrensdi2")
     XXT_sharded.lambdav = problem_size*10
-    if (verify):
-        A = XXT_sharded.numpy()
-        print("Computing local cholesky")
-        L = np.linalg.cholesky(A)
-
     t = time.time()
-    instructions, trailing, L_sharded = compiler._chol(XXT_sharded, truncate=truncate)
+    program, meta = qr(XXT_sharded)
     pipeline_width = args.pipeline
     if (lru):
         cache_size = 5
     else:
         cache_size = 0
     pywren_config = pwex.config
-    config = npw.config.default()
-    program = lp.LambdaPackProgram(instructions, executor=pywren.lambda_executor, pywren_config=pywren_config, num_priorities=num_priorities, eager=eager, config=config, write_limit=write_limit, read_limit=read_limit)
-    warmup_start = time.time()
-    if (warmup):
-        warmup_sleep = 170
-        def warmup_fn(x):
-            program.incr_up(1)
-            time.sleep(warmup_sleep)
-            program.decr_up(1)
-        print("Warming up...")
-        futures = pwex.map(warmup_fn, range(max_cores))
-        last_spinup = time.time()
-        while(True):
-            if ((time.time() - last_spinup) > 0.75*warmup_sleep):
-                print("Calling pwex.map..")
-                futures = pwex.map(warmup_fn, range(max_cores))
-                last_spinup = time.time()
-            time.sleep(2)
-            if (program.get_up() is None):
-                up_workers = 0
-            else:
-                up_workers = int(program.get_up())
-            print("{0} workers alive".format(up_workers))
-            if (up_workers >= max_cores):
-                time.sleep(warmup_sleep)
-                break
-
-    warmup_end = time.time()
-    print("Warmup took {0} seconds".format(warmup_end - warmup_start))
     e = time.time()
     print("Program compile took {0} seconds".format(e - t))
     print("program.hash", program.hash)
@@ -188,11 +161,7 @@ def run_experiment(problem_size, shard_size, pipeline, num_priorities, lru, eage
     program.start()
     t = time.time()
     logger.info("Starting with {0} cores".format(start_cores))
-    invoker = fs.ThreadPoolExecutor(1)
-    all_future_futures = invoker.submit(lambda: pwex.map(lambda x: job_runner.lambdapack_run(program, pipeline_width=pipeline_width, cache_size=cache_size, timeout=timeout), range(start_cores), extra_env=extra_env))
-    #print(all_future_futures.result())
-    all_futures = [all_future_futures]
-    # print([f.result() for f in all_futures])
+    all_futures = pwex.map(lambda x: job_runner.lambdapack_run(program, pipeline_width=pipeline_width, cache_size=cache_size, timeout=timeout), range(start_cores), extra_env=extra_env)
     start_time = time.time()
     last_run_time = start_time
     print(program.program_status())
@@ -287,15 +256,14 @@ def run_experiment(problem_size, shard_size, pipeline, num_priorities, lru, eage
                 read_rate_5_min_window = "N/A"
                 write_rate_5_min_window = "N/A"
 
-
-            read_timeouts = int(REDIS_CLIENT.get("s3.timeouts.read"))
-            write_timeouts = int(REDIS_CLIENT.get("s3.timeouts.write"))
-            redis_timeouts = int(REDIS_CLIENT.get("redis.timeouts"))
+            read_timeouts = int(parse_int(REDIS_CLIENT.get("s3.timeouts.read")))
+            write_timeouts = int(parse_int(REDIS_CLIENT.get("s3.timeouts.write")))
+            redis_timeouts = int(parse_int(REDIS_CLIENT.get("redis.timeouts")))
             all_read_timeouts.append(read_timeouts)
             all_write_timeouts.append(write_timeouts)
             all_redis_timeouts.append(redis_timeouts)
-            read_timeouts_fraction = read_timeouts/current_objects_read
-            write_timeouts_fraction = write_timeouts/current_objects_write
+            read_timeouts_fraction = read_timeouts/(current_objects_read+1e-8)
+            write_timeouts_fraction = write_timeouts/(current_objects_write+1e-8)
             print("=======================================")
             print("Max PC is {0}".format(max_pc))
             print("Waiting: {0}, Currently Processing: {1}".format(waiting, running))
@@ -310,30 +278,9 @@ def run_experiment(problem_size, shard_size, pipeline, num_priorities, lru, eage
             print("=======================================")
 
             time_since_launch = time.time() - last_run_time
-            if (autoscale_policy == "dynamic"):
-                if (time_since_launch > launch_granularity and up_workers < np.ceil(waiting*0.5/pipeline_width) and up_workers < max_cores):
-                    cores_to_launch = int(min(np.ceil(waiting/pipeline_width) - up_workers, max_cores - up_workers))
-                    logger.info("launching {0} new tasks....".format(cores_to_launch))
-                    new_future_futures = invoker.submit(lambda: pwex.map(lambda x: job_runner.lambdapack_run(program, pipeline_width=pipeline_width, cache_size=cache_size, timeout=timeout), range(cores_to_launch), extra_env=extra_env))
-                    last_run_time = time.time()
-                    # check if we OOM-erred
-                   # [x.result() for x in all_futures]
-                    all_futures.extend(new_future_futures)
-            elif (autoscale_policy == "constant_timeout"):
-                if (time_since_launch > (0.85*timeout)):
-                    cores_to_launch = max_cores
-                    logger.info("launching {0} new tasks....".format(cores_to_launch))
-                    new_future_futures = invoker.submit(lambda: pwex.map(lambda x: job_runner.lambdapack_run(program, pipeline_width=pipeline_width, cache_size=cache_size, timeout=timeout), range(cores_to_launch), extra_env=extra_env))
-                    last_run_time = time.time()
-                    # check if we OOM-erred
-                   # [x.result() for x in all_futures]
-                    all_futures.append(new_future_futures)
-            else:
-                raise Exception("unknown autoscale policy")
+            if (time_since_launch > (0.85*timeout)):
+                break
             exp["time_steps"] += 1
-        if (verify):
-            L_sharded_local = L_sharded.numpy()
-            print("max diff", np.max(np.abs(L_sharded_local - L)))
     except KeyboardInterrupt:
         exp["failed"] = True
         program.stop()
@@ -344,6 +291,7 @@ def run_experiment(problem_size, shard_size, pipeline, num_priorities, lru, eage
         program.stop()
         raise
         pass
+    print("killing program...")
     print(program.program_status())
     exp["all_futures"] = all_futures
     exp_bytes = dill.dumps(exp)
@@ -379,8 +327,9 @@ if __name__ == "__main__":
     parser.add_argument('--autoscale_policy', type=str, default="constant_timeout")
     parser.add_argument('--log_granularity', type=int, default=5)
     parser.add_argument('--launch_granularity', type=int, default=60)
+    parser.add_argument('--compute_threads_per_worker', type=int, default=1)
     parser.add_argument('--trial', type=int, default=0)
-    parser.add_argument('--num_priorities', type=int, default=1) 
+    parser.add_argument('--num_priorities', type=int, default=1)
     parser.add_argument('--lru', action='store_true')
     parser.add_argument('--eager', action='store_true')
     parser.add_argument('--standalone', action='store_true')
@@ -388,7 +337,7 @@ if __name__ == "__main__":
     parser.add_argument('--verify', action='store_true')
     parser.add_argument('--matrix_exists', action='store_true')
     args = parser.parse_args()
-    run_experiment(args.problem_size, args.shard_size, args.pipeline, args.num_priorities, args.lru, args.eager, args.truncate, args.max_cores, args.start_cores, args.trial, args.launch_granularity, args.timeout, args.log_granularity, args.autoscale_policy, args.standalone, args.warmup, args.verify, args.matrix_exists, args.write_limit, args.read_limit)
+    run_experiment(args.problem_size, args.shard_size, args.pipeline, args.num_priorities, args.lru, args.eager, args.truncate, args.max_cores, args.start_cores, args.trial, args.launch_granularity, args.timeout, args.log_granularity, args.autoscale_policy, args.standalone, args.warmup, args.verify, args.matrix_exists, args.write_limit, args.read_limit, args.compute_threads_per_worker)
 
 
 

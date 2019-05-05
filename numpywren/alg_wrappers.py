@@ -4,8 +4,8 @@ from numpywren import matrix_utils, uops
 from numpywren import lambdapack as lp
 from numpywren import job_runner, frontend
 from numpywren.compiler import lpcompile_for_execution
-from numpywren.algs import CHOLESKY, TSQR, GEMM, QR
-from numpywren.matrix_utils import constant_zeros
+from numpywren.algs import CHOLESKY, TSQR, GEMM, QR, BDFAC
+from numpywren.matrix_utils import constant_zeros, constant_zeros_ext
 from numpywren.matrix_init import shard_matrix
 import dill
 import numpywren as npw
@@ -14,7 +14,8 @@ import time
 
 
 def cholesky(X, truncate=0):
-    S = BigMatrix("Cholesky.Intermediate({0})".format(X.key), shape=(X.num_blocks(1)+1, X.shape[0], X.shape[0]), shard_sizes=(1, X.shard_sizes[0], X.shard_sizes[0]), bucket=X.bucket, write_header=True)
+    S = BigMatrix("Cholesky.Intermediate({0})".format(X.key), shape=(X.num_blocks(1)+1, X.shape[0], X.shape[0]), shard_sizes=(1, X.shard_sizes[0], X.shard_sizes[0]), bucket=X.bucket, write_header=True, parent_fn=constant_zeros)
+    #S.free()
     O = BigMatrix("Cholesky({0})".format(X.key), shape=(X.shape[0], X.shape[0]), shard_sizes=(X.shard_sizes[0], X.shard_sizes[0]), write_header=True, parent_fn=constant_zeros)
     t = time.time()
     p0= lpcompile_for_execution(CHOLESKY, inputs=["I"], outputs=["O"])
@@ -86,6 +87,35 @@ def qr(A):
     config = npw.config.default()
     program = lp.LambdaPackProgram(p1, config=config)
     return program, {"outputs":[Rs, Vs, Ts], "intermediates":[Ss], "compile_time": c_time}
+
+
+def bdfac(A, truncate=0):
+    b_fac = 2
+    N = A.shape[0]
+    N_blocks = A.num_blocks(0)
+    b_fac = 2
+    shard_size = A.shard_sizes[0]
+    num_tree_levels = max(int(np.ceil(np.log2(A.num_blocks(0))/np.log2(b_fac))), 1) + 1
+    V_QR = BigMatrix("V_QR", shape=(2*N, num_tree_levels, 2*N), shard_sizes=(1, 1, shard_size), write_header=True, safe=False)
+    T_QR = BigMatrix("T_QR", shape=(2*N, num_tree_levels, 2*N), shard_sizes=(1, 1, shard_size), write_header=True, safe=False)
+    R_QR = BigMatrix("R_QR", shape=(2*N, num_tree_levels, 2*N), parent_fn=constant_zeros, shard_sizes=(shard_size, 1, shard_size), write_header=True, safe=False)
+    S_QR = BigMatrix("S_QR", shape=(2*N, num_tree_levels, 2*N, 2*N), parent_fn=constant_zeros, shard_sizes=(1, 1, shard_size, shard_size), write_header=True, safe=False)
+    V_LQ = BigMatrix("V_LQ", shape=(2*N, num_tree_levels, 2*N), shard_sizes=(1, 1, shard_size), write_header=True, safe=False)
+    T_LQ = BigMatrix("T_LQ", shape=(2*N, num_tree_levels, 2*N), shard_sizes=(1, 1, shard_size), write_header=True, safe=False)
+    L_LQ = BigMatrix("L_LQ", shape=(2*N, num_tree_levels, 2*N), parent_fn=constant_zeros_ext, shard_sizes=(1, 1, shard_size), write_header=True, safe=False)
+    S_LQ = BigMatrix("S_LQ", shape=(2*N, num_tree_levels, 2*N, 2*N), parent_fn=constant_zeros_ext, shard_sizes=(1, 1, shard_size, shard_size), write_header=True, safe=False)
+    t = time.time()
+    p0 = lpcompile_for_execution(BDFAC, inputs=["I"], outputs=["R_QR", "L_LQ"])
+    p1 = p0(A, V_QR, T_QR, S_QR, R_QR, V_LQ, T_LQ, S_LQ, L_LQ, N_blocks, truncate)
+    e = time.time()
+    c_time = e - t
+    config = npw.config.default()
+    program = lp.LambdaPackProgram(p1, config=config)
+    return program, {"outputs":[L_LQ, R_QR], "intermediates":[S_LQ, S_QR, T_QR, V_QR, V_LQ, T_LQ], "compile_time": c_time}
+
+
+
+
 
 
 

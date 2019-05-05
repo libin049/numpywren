@@ -67,7 +67,7 @@ class ProgramStatus(Enum):
     RUNNING = 1
     EXCEPTION = 2
     NOT_STARTED = 3
-#here us ec2, however in master, it use dynamodb to put status of instructions
+
 def put(client, key, value, s3=False, s3_bucket=""):
     #TODO: fall back to S3 here
     if (s3):
@@ -77,6 +77,7 @@ def put(client, key, value, s3=False, s3_bucket=""):
     val = None
     while(True):
       try:
+        print(key, value)
         val = client.set(key, value)
         break
       except redis.exceptions.TimeoutError:
@@ -237,8 +238,8 @@ class RemoteRead(RemoteInstruction):
         loop = asyncio.get_event_loop()
         self.start_time = time.time()
         t = time.time()
-        print("TRYING TO READ ...", self.bidxs)
-        print("===========")
+        #print("TRYING TO READ ...", self.bidxs)
+        #print("===========")
         if (self.result is None):
             cache_key = (self.matrix.key, self.matrix.bucket, self.matrix.true_block_idx(*self.bidxs))
             if (self.cache != None and cache_key in self.cache):
@@ -250,11 +251,11 @@ class RemoteRead(RemoteInstruction):
             else:
               t = time.time()
               backoff = 0.2
-              print(f"Reading from {self.matrix} at {self.bidxs}")
+              #print(f"Reading from {self.matrix} at {self.bidxs}")
               while (True):
                 try:
                   self.result = await asyncio.wait_for(self.matrix.get_block_async(loop, *self.bidxs), self.MAX_READ_TIME)
-                  print("read shape", self.result.shape)
+                  #print("read shape", self.result.shape)
                   break
                 except (asyncio.TimeoutError, aiohttp.client_exceptions.ClientPayloadError, fs._base.CancelledError, botocore.exceptions.ClientError):
                   await asyncio.sleep(backoff)
@@ -266,7 +267,7 @@ class RemoteRead(RemoteInstruction):
               e = time.time()
         self.end_time = time.time()
         e = time.time()
-        print(f"Read took {e - t} seconds")
+        #print(f"Read took {e - t} seconds")
         return self.result
 
     def clear(self):
@@ -292,9 +293,7 @@ class RemoteWrite(RemoteInstruction):
         self.write_size = np.product(self.matrix.shard_sizes)*np.dtype(self.matrix.dtype).itemsize
 
     #@profile
-    async def __call__(self, prev=None):
-        if (prev != None):
-          await prev
+    async def __call__(self, skip_empty=False):
         t = time.time()
         loop = asyncio.get_event_loop()
         self.start_time = time.time()
@@ -304,11 +303,20 @@ class RemoteWrite(RemoteInstruction):
               # write to the cache
               self.cache[cache_key] = self.data_loc[self.data_idx]
             backoff = 0.2
+            self.sparse_write = False
             #print(f"Writing to {self.matrix} at {self.bidxs}")
             while (True):
               try:
-                print("Writing to ", self.bidxs)
-                self.result = await asyncio.wait_for(self.matrix.put_block_async(self.data_loc[self.data_idx], loop, *self.bidxs), self.MAX_WRITE_TIME)
+                #print("Writing to ", self.bidxs)
+                all_zero = np.allclose(self.data_loc[self.data_idx], 0)
+                if (all_zero and skip_empty):
+                  #print(f"Skipping sparse write to {self.bidxs}")
+                  sparse_write = True
+                  print(f"Skipping sparse write to {self.bidxs}")
+                  self.sparse_write = True
+                  pass
+                else:
+                  self.result = await asyncio.wait_for(self.matrix.put_block_async(self.data_loc[self.data_idx], loop, *self.bidxs), self.MAX_WRITE_TIME)
                 break
               except (asyncio.TimeoutError, aiohttp.client_exceptions.ClientPayloadError, fs._base.CancelledError, botocore.exceptions.ClientError) as e:
                   await asyncio.sleep(backoff)
@@ -318,7 +326,7 @@ class RemoteWrite(RemoteInstruction):
             self.ret_code = 0
         self.end_time = time.time()
         e = time.time()
-        print(f"Write took {e - t} seconds")
+        #print(f"Write took {e - t} seconds")
         return self.result
 
     def clear(self):
@@ -358,7 +366,7 @@ class RemoteCall(RemoteInstruction):
               pyarg_list.append(arg.result)
             elif (isinstance(arg, float)):
               pyarg_list.append(arg)
-          #print("CALLING COMPUTE", self.compute)
+          ##print("CALLING COMPUTE", self.compute)
           results = self.compute(*pyarg_list, **self.kwargs)
           if (isinstance(results, tuple) and len(results) != len(self.results)):
             raise Exception("Expected {0} results, got {1}".format(len(self.results), len(results)))
@@ -372,7 +380,7 @@ class RemoteCall(RemoteInstruction):
           return self.results
         res = await loop.run_in_executor(self.executor, compute)
         e = time.time()
-        print(f"Compute {self.compute} took {e - t} seconds")
+        #print(f"Compute {self.compute} took {e - t} seconds")
         return res
 
     def clear(self):
@@ -382,8 +390,16 @@ class RemoteCall(RemoteInstruction):
 
 
     def get_flops(self):
+      pyarg_list = []
+      for arg in self.argv_instr:
+        if (isinstance(arg, RemoteRead)):
+          pyarg_list.append(arg.result)
+        elif (isinstance(arg, float)):
+          pyarg_list.append(arg)
       if getattr(self.compute, "flops", None) is not None:
-        return self.compute.flops(*argv_instr)
+        f_count = self.compute.flops(*pyarg_list)
+        #print("FLOPS", f_count)
+        return f_count
       else:
         return 0
 
@@ -402,13 +418,13 @@ class RemoteReturn(RemoteInstruction):
         self.result = None
     async def __call__(self, client, return_hash):
       logger.debug("RETURNING...")
-      print("RETURNING....")
+      #print("RETURNING....")
       loop = asyncio.get_event_loop()
       self.start_time = time.time()
       if (self.result == None):
-        print("RETURNING VALUE ", PS.SUCCESS.value)
+        #print("RETURNING VALUE ", PS.SUCCESS.value)
         put(client, return_hash, PS.SUCCESS.value)
-        print("GET VALUE ", get(client, return_hash))
+        #print("GET VALUE ", get(client, return_hash))
         self.size = sys.getsizeof(PS.SUCCESS.value)
       self.end_time = time.time()
       return self.result
@@ -463,11 +479,12 @@ class LambdaPackProgram(object):
        on stateless computing substrates
        Maintains global state information
     '''
-    def __init__(self, program, config, num_priorities=1, eager=False):
+    def __init__(self, program, config, num_priorities=1, eager=False, block_sparse=False):
         self.config = config
         self.config = config
         self.bucket = matrix.DEFAULT_BUCKET
         self.program = program
+        self.block_sparse = block_sparse
         self.max_priority = num_priorities - 1
         self.eager = eager
         cpid = control_plane.get_control_plane_id(config=config)
@@ -511,10 +528,19 @@ class LambdaPackProgram(object):
       put(self.control_plane.client, self._node_key(expr_id, var_values), status.value)
       return status
 
-    def set_profiling_info(self, inst_block, expr_idx, var_values):
+    def dump_profiling_info(self, inst_block, expr_idx, var_values):
         byte_string = dill.dumps(inst_block)
-        client = boto3.client('s3', region_name=self.control_plane.region)
-        client.put_object(Bucket=self.bucket, Key="lambdapack/{0}/{1}_{2}".format(self.hash, expr_idx, var_values), Body=byte_string)
+        return byte_string
+
+    async def begin_write(self, loop=None):
+      if (loop == None):
+        loop = asyncio.get_event_loop()
+      key = "{0}.write".format(self.hash)
+
+    async def begin_read(self, loop=None):
+      if (loop == None):
+        loop = asyncio.get_event_loop()
+      key = "{0}.read".format(self.hash)
 
     def post_op(self, expr_idx, var_values, ret_code, inst_block, tb=None):
         # need clean post op logic to handle
@@ -528,17 +554,17 @@ class LambdaPackProgram(object):
         try:
           post_op_start = time.time()
           children = self.program.find_children(expr_idx, var_values)
-          print("children", children)
+          #print("children", children)
           node_status = self.get_node_status(expr_idx, var_values)
           # if we had 2 racing tasks and one finished no need to go through rigamarole
           # of re-enqueeuing children
-          if (node_status == NS.FINISHED):
-            return
+          #if (node_status == NS.FINISHED):
+            # return
           self.set_node_status(expr_idx, var_values, NS.POST_OP)
           if (ret_code == PS.EXCEPTION and tb != None):
             self.handle_exception(" EXCEPTION", tb=tb, expr_idx=expr_idx, var_values=var_values)
           ready_children = []
-          #print(f"ALL CHILDREN {children}")
+          ##print(f"ALL CHILDREN {children}")
           for child in children:
               my_child_edge = self._edge_key(expr_idx, var_values, *child)
               child_edge_sum_key = self._node_edge_sum_key(*child)
@@ -549,14 +575,14 @@ class LambdaPackProgram(object):
               if len(done) == 0:
                 raise Exception("Redis Atomic Set and Sum timed out!")
               val = val_future.result()
-              print(child[1])
+              #print(child[1])
               parents = self.program.find_parents(child[0], child[1])
-              print("child parents", parents)
+              #print("child parents", parents)
               num_child_parents = len(parents)
               if ((val == num_child_parents) and self.get_node_status(*child) != NS.FINISHED):
                 self.set_node_status(*child, NS.READY)
                 ready_children.append(child)
-          print("Ready children", ready_children)
+          #print("Ready children", ready_children)
 
           if self.eager and ready_children:
               # TODO: Re-add priorities here
@@ -580,10 +606,14 @@ class LambdaPackProgram(object):
           inst_block.clear()
           post_op_end = time.time()
           post_op_time = post_op_end - post_op_start
+          inst_block.post_op_start = post_op_start
+          inst_block.post_op_end = post_op_end
+          inst_block.expr_idx = expr_idx
+          inst_block.var_values = var_values
           self.incr_progress()
-          self.set_profiling_info(inst_block, expr_idx, var_values)
+          profiling_info = self.dump_profiling_info(inst_block, expr_idx, var_values)
           e = time.time()
-          print(f"Post op for {expr_idx, var_values}, took {e - t} seconds")
+          #print(f"Post op for {expr_idx, var_values}, took {e - t} seconds")
           terminator = self.program.is_terminator(expr_idx)
           if (terminator):
             return_key = self.hash + "_return"
@@ -597,21 +627,35 @@ class LambdaPackProgram(object):
             print("Num finished terminators", val,  "num terminators total", self.program.num_terminators)
             if (val == self.program.num_terminators):
               self.return_success()
-          return next_operator
+
+          ##print('pooop\n'*20)
+          ##print("next operator", next_operator)
+          ##print("next operator", profiling_info)
+          return next_operator, profiling_info
         except Exception as e:
             tb = traceback.format_exc()
             traceback.print_exc()
             self.handle_exception("POST OP EXCEPTION", tb=tb, expr_idx=expr_idx, var_values=var_values)
+            raise
 
-    def start(self):
+    def start(self, parallel=False):
         put(self.control_plane.client, self.hash, PS.RUNNING.value)
-        sqs = boto3.resource('sqs')
-        for starter in self.program.starters:
-          self.set_node_status(*starter, NS.READY)
-          # TODO readd priorities here
+        print("len starters", len(self.program.starters))
+        chunked_starters = chunk(self.program.starters, 100)
+        def start_chunk(c):
+          sqs = boto3.resource('sqs')
           queue = sqs.Queue(self.queue_urls[0])
-          queue.send_message(MessageBody=json.dumps([starter[0], {str(key): val for key, val in starter[1].items()}]))
-        return 0
+          for x in c:
+            self.set_node_status(*x, NS.READY)
+            queue.send_message(MessageBody=json.dumps([x[0], {str(key): val for key, val in x[1].items()}]))
+        if (parallel):
+          pwex = pywren.default_executor()
+          futures = pwex.map(start_chunk, chunked_starters)
+          pywren.wait(futures)
+        else:
+          for c in chunked_starters:
+            start_chunk(c)
+          return 0
 
 
     def stop(self):
@@ -621,7 +665,7 @@ class LambdaPackProgram(object):
         put(self.control_plane.client, self.hash, e)
 
     def return_success(self):
-      print("RETURNING....")
+      #print("RETURNING....")
       put(self.control_plane.client, self.hash, PS.SUCCESS.value)
 
 
@@ -639,6 +683,17 @@ class LambdaPackProgram(object):
     def incr_up(self, amount):
       incr(self.control_plane.client, self.up, amount)
 
+    def incr_repeated_compute(self, amount=1):
+      incr(self.control_plane.client, "{0}_repeated_compute".format(self.hash), amount)
+
+    def incr_repeated_post_op(self, amount=1):
+      incr(self.control_plane.client, "{0}_repeated_post_op".format(self.hash), amount)
+    def incr_repeated_finish(self, amount=1):
+      incr(self.control_plane.client, "{0}_repeated_finish".format(self.hash), amount)
+
+    def incr_not_ready(self, amount=1):
+      incr(self.control_plane.client, "{0}_not_ready".format(self.hash), amount)
+
     def incr_progress(self):
       incr(self.control_plane.client, "{0}_progress".format(self.hash))
 
@@ -651,9 +706,17 @@ class LambdaPackProgram(object):
       if (amount > 0):
         incr(self.control_plane.client,"{0}_read".format(self.hash), amount)
 
+    def incr_sparse_read(self, amount):
+      if (amount > 0):
+        incr(self.control_plane.client,"{0}_sparse_read".format(self.hash), amount)
+
     def incr_write(self, amount):
       if (amount > 0):
         incr(self.control_plane.client,"{0}_write".format(self.hash), amount)
+
+    def incr_sparse_write(self, amount):
+      if (amount > 0):
+        incr(self.control_plane.client,"{0}_write_sparse".format(self.hash), amount)
 
     def decr_flops(self, amount):
       if (amount > 0):
@@ -694,7 +757,7 @@ class LambdaPackProgram(object):
         while (status == PS.RUNNING):
               time.sleep(sleep_time)
               status = self.program_status()
-              print("Program status is ", status)
+              #print("Program status is ", status)
 
     def free(self):
         for queue_url in self.queue_urls:

@@ -82,6 +82,7 @@ def scope_lookup(var, scope):
     else:
         raise Exception(f"Scope lookup failed: scope={scope}, var={var}")
 
+
 def eval_index_expr(index_expr, scope, dummify=False):
     bigm = scope_lookup(index_expr.matrix_name, scope)
     idxs = []
@@ -91,6 +92,8 @@ def eval_index_expr(index_expr, scope, dummify=False):
 
 def isinstance_fast(obj, typ):
     return type(obj) == typ
+
+memoize = {}
 
 def eval_expr(expr, scope, dummify=False):
     if (isinstance(expr, sympy.Basic)):
@@ -114,17 +117,23 @@ def eval_expr(expr, scope, dummify=False):
     elif (isinstance_fast(expr, BinOp)):
         left = eval_expr(expr.left, scope, dummify=dummify)
         right = eval_expr(expr.right, scope, dummify=dummify)
-        return op_table[expr.op](left, right)
+        val = op_table[expr.op](left, right)
+        if (val == sympy.zoo): raise Exception("Infinite value in eval BinOp")
+        return val
     elif (isinstance_fast(expr, CmpOp)):
         left = eval_expr(expr.left, scope, dummify=dummify)
         right = eval_expr(expr.right, scope, dummify=dummify)
         return op_table[expr.op](left, right)
     elif (isinstance_fast(expr, UnOp)):
         e = eval_expr(expr.e, scope, dummify=dummify)
-        return op_table[expr.op](e)
+        val = op_table[expr.op](e)
+        if (val == sympy.zoo): raise Exception("Infinite value in eval UnOp")
+        return val
     elif (isinstance_fast(expr, Mfunc)):
         e = eval_expr(expr.e, scope, dummify=dummify)
-        return op_table[expr.op](e)
+        val = op_table[expr.op](e)
+        if (val == sympy.zoo): raise Exception("Infinite value in eval Mfunc")
+        return val
     elif (isinstance_fast(expr, RangeVar)):
         if (not dummify):
             raise Exception(f"Range variable {expr} cannot be evaluated directly, please specify a specific variable  or pass in dummify=True")
@@ -334,6 +343,8 @@ def recursive_solver(A, A_funcs, C, C_funcs, b0, b1, solve_vars, var_limits, par
     else:
         # A is nonempty
         x = symbolic_linsolve(A, b0, solve_vars)
+        level = sympy.Symbol('level')
+        j = sympy.Symbol('j')
         if (len(x) != 0):
             x = list(x)[0]
             sol_dict = dict(zip([str(x) for x in solve_vars], x))
@@ -382,6 +393,12 @@ def recursive_solver(A, A_funcs, C, C_funcs, b0, b1, solve_vars, var_limits, par
             res = recursive_solver(A, A_funcs, C, C_funcs, b0, b1, solve_vars_recurse, var_limits_recurse, constant_sol)
             [x.update(partial_sol) for x in res]
             return res
+        else:
+            for v in solve_vars:
+               solutions[0][str(v)] = v
+            solve_vars, constant_range = _resort_var_names_by_limits(solutions[0], solve_vars, var_limits)
+            assert constant_range
+
     assert len(solutions) == 1
     sol = solutions.pop(0)
     constant_sol = np.all([is_constant(v) for k,v in sol.items()])
@@ -434,7 +451,7 @@ def prune_solutions(solutions, var_limits):
         if (not bad_sol):
             valid_solutions.append(sol)
     return valid_solutions
-
+#@profile
 def integerify_solutions(solutions):
     new_sols = []
     for p_idx, sol in solutions:
@@ -445,10 +462,10 @@ def integerify_solutions(solutions):
     return new_sols
 
 
-
+#@profile
 def lambdify(expr):
     symbols = extract_vars(expr)
-    _f = sympy.lambdify(symbols, expr, ("math", "sympy"), dummify=False)
+    _f = sympy.lambdify(symbols, expr, modules=("sympy", {"ceil":sympy.ceiling}), dummify=False)
     def f(**kwargs):
         if (len(kwargs) < len(symbols)):
             raise Exception("Insufficient Args")
@@ -460,7 +477,7 @@ def lambdify(expr):
 
 
 
-
+#@profile
 def template_match(page, offset, abstract_page, abstract_offset, offset_types, scope):
     ''' Look for possible template matches from abstract_page[abstract_offset] to page[offset] in scope '''
     # Form set of equations Z with abstract offset as LHS and offset as RHS
@@ -574,7 +591,7 @@ def template_match(page, offset, abstract_page, abstract_offset, offset_types, s
     return sols
 
 
-
+#@profile
 def find_parents(program, idx, value_map):
     ''' Given a specific r_call and arguments to evaluate it completely
         return the program locations that writes to the input of r_call
@@ -603,10 +620,14 @@ def find_parents(program, idx, value_map):
                 parents += [(p_idx, x) for x in local_parents]
     return integerify_solutions(utils.remove_duplicates(parents))
 
+
+#@profile
 def find_children(program, idx, value_map):
     ''' Given a specific r_call and arguments to evaluate it completely
         return all other program locations that read from the output of r_call
     '''
+    global memoize
+    memoize = {}
     r_call = program[idx]
     ib = eval_remote_call(r_call, value_map)
     children = []
@@ -640,6 +661,7 @@ def extract_range_vars(scope):
                     range_vars[k] = v
     return range_vars
 
+#@profile
 def is_const_range_var(range_var, scope):
     start = range_var.start
     end = range_var.end
