@@ -57,11 +57,24 @@ lanuch a ec2 for redis
 numpywren control-plane launch 
 ```
 
-4. upload runtimes to S3 (useless)
+Then, you can run:
+```
+ python tests/test_alg_correctness.py
+```
+For some numpy operation, it needs dynamic library(.so), these dynamic libraries need a runtimes S3 buket.
+In nsdi, the numpywren author set a public S3 runtimes buket:numpywrenpublic, key: lapack
+
+https://s3.console.aws.amazon.com/s3/buckets/numpywrenpublic/lapack/?region=us-west-2&tab=overview
+You can see these code in numpywren/numpywren/kernels.py.
+
 Some info:
  - https://github.com/pywren/pywren/pull/169
  - https://github.com/pywren/pywren/issues/105
  - https://github.com/pywren/pywren/pull/172
+
+I think you can build runtime by youself.
+
+4. upload runtimes to S3 (useless, TBD)
 
 ```
 git clone https://github.com/libin049/runtimes
@@ -75,8 +88,3 @@ Then input:
 ubuntu@ec2-54-71-113-139.us-west-2.compute.amazonaws.com
 ```
 `ubuntu` is the name, `ec2-54-71-113-139.us-west-2.compute.amazonaws.com` is the host name.
-
-Then, you can run:
-```
- python tests/test_alg_correctness.py
-```
