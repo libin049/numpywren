@@ -61,11 +61,14 @@ Then, you can run:
 ```
  python tests/test_alg_correctness.py
 ```
-For some numpy operation, it needs dynamic library(.so), these dynamic libraries need a runtimes S3 buket.
-In nsdi, the numpywren author set a public S3 runtimes buket:numpywrenpublic, key: lapack
 
-https://s3.console.aws.amazon.com/s3/buckets/numpywrenpublic/lapack/?region=us-west-2&tab=overview
-You can see these code in numpywren/numpywren/kernels.py.
+-------------------------------------------TBD-------------------------------------------------------------
+
+For some numpy operation, it needs dynamic library(.so), these dynamic libraries need a runtimes S3 buket.
+In nsdi branch, the numpywren author set a public S3 runtimes buket:numpywrenpublic, key: lapack(
+https://s3.console.aws.amazon.com/s3/buckets/numpywrenpublic/lapack/?region=us-west-2&tab=overview)
+
+You can see related code in numpywren/numpywren/kernels.py.
 
 Some info:
  - https://github.com/pywren/pywren/pull/169
